@@ -164,4 +164,3 @@ function draw() {
 }
 
 draw();
-</script>
