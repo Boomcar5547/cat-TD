@@ -2,15 +2,17 @@
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <title>GemCraft Lite Prototype</title>
+    <title>GemCraft Lite Prototype - Map & Monsters</title>
     <style>
         body { background: #1a1a1a; color: #eee; font-family: sans-serif; display: flex; margin: 0; overflow: hidden; }
         #game-container { position: relative; }
         canvas { background: #000; cursor: crosshair; border-right: 2px solid #333; }
-        #sidebar { width: 250px; padding: 20px; display: flex; flex-direction: column; gap: 15px; background: #222; }
+        #sidebar { width: 250px; padding: 20px; display: flex; flex-direction: column; gap: 10px; background: #222; }
         .gem-btn { padding: 10px; border: none; cursor: pointer; color: white; font-weight: bold; border-radius: 4px; transition: 0.2s; }
         .gem-btn:hover { opacity: 0.8; transform: scale(1.05); }
-        .mana-display { font-size: 24px; color: #4af; text-shadow: 0 0 10px #04f; margin-bottom: 10px; }
+        .sys-btn { padding: 12px; background: #444; color: #fff; border: 2px solid #666; font-weight: bold; cursor: pointer; border-radius: 4px;}
+        .sys-btn:hover { background: #555; }
+        .mana-display { font-size: 24px; color: #4af; text-shadow: 0 0 10px #04f; margin-bottom: 5px; }
         #menu { position: absolute; display: none; background: rgba(0,0,0,0.9); border: 1px solid #555; padding: 10px; border-radius: 5px; z-index: 100; }
         #menu button { display: block; width: 100%; margin: 5px 0; padding: 8px; cursor: pointer; background: #444; color: white; border: none; }
         #menu button:hover { background: #666; }
@@ -29,15 +31,15 @@
 
 <div id="sidebar">
     <div class="mana-display">Mana: <span id="mana">500</span></div>
-    <div style="font-size: 12px; color: #888;">点击创建宝石 (100 Mana)</div>
+    
+    <button class="sys-btn" id="toggle-btn" onclick="toggleGame()" style="background: #2E8B57;">▶ 开始刷怪 (Wave 1)</button>
+    <hr style="width:100%; border-color:#444; margin: 5px 0;">
+
+    <div style="font-size: 12px; color: #888;">造宝石 (100 Mana) 然后拖入基座</div>
     <button class="gem-btn" style="background: #ff4d4d;" onclick="createGem('RED')">红 (溅射)</button>
     <button class="gem-btn" style="background: #4da6ff;" onclick="createGem('BLUE')">蓝 (减速)</button>
     <button class="gem-btn" style="background: #ffa500;" onclick="createGem('ORANGE')">橙 (回蓝)</button>
     <button class="gem-btn" style="background: #ffff4d; color: #000;" onclick="createGem('YELLOW')">黄 (暴击)</button>
-    <button class="gem-btn" style="background: #4dff4d; color: #000;" onclick="createGem('GREEN')">绿 (毒伤)</button>
-    <button class="gem-btn" style="background: #b366ff;" onclick="createGem('PURPLE')">紫 (破甲)</button>
-    <hr style="width:100%; border-color:#444">
-    <div style="font-size: 12px; color: #888;">按住拖拽宝石至基座</div>
 </div>
 
 <script>
@@ -45,194 +47,249 @@ const canvas = document.getElementById('canvas');
 const ctx = canvas.getContext('2d');
 const manaEl = document.getElementById('mana');
 const menu = document.getElementById('menu');
+const toggleBtn = document.getElementById('toggle-btn');
 
-// --- 游戏配置 ---
+const COLORS = { RED:'#ff4d4d', BLUE:'#4da6ff', ORANGE:'#ffa500', YELLOW:'#ffff4d', MIXED:'#eee' };
+
+// --- 游戏地图路径 (S型) ---
+const PATH = [
+    {x: -50, y: 150},
+    {x: 600, y: 150},
+    {x: 600, y: 450},
+    {x: -50, y: 450}
+];
+
+// --- 游戏状态 ---
 let state = {
     mana: 800,
-    inventory: [], // 侧边栏/备用区的宝石
+    inventory: [], 
     buildings: [
-        { x: 200, y: 300, type: 'TOWER', gem: null },
-        { x: 400, y: 300, type: 'AMPLIFIER', gem: null },
-        { x: 300, y: 450, type: 'TRAP', gem: null }
+        { x: 250, y: 220, type: 'TOWER', gem: null }, // 放在第一条路下方
+        { x: 500, y: 300, type: 'TOWER', gem: null }, // 放在拐角内侧
+        { x: 300, y: 450, type: 'TRAP', gem: null }   // 直接放在下方的路上
     ],
     enemies: [],
+    lasers: [], // 存储激光动画
     draggingGem: null,
     selectedBuilding: null,
-    frame: 0
+    isRunning: false,
+    frame: 0,
+    waveFrame: 0
 };
 
-const COLORS = { RED:'#ff4d4d', BLUE:'#4da6ff', ORANGE:'#ffa500', YELLOW:'#ffff4d', GREEN:'#4dff4d', PURPLE:'#b366ff', MIXED:'#eee' };
-
-// --- 宝石类 ---
+// --- 实体类 ---
 class Gem {
     constructor(type, level = 1) {
         this.level = level;
         this.components = { [type]: 1 };
-        this.color = COLORS[type];
-        this.x = 0; this.y = 0; // 仅用于拖拽视觉
+        this.color = COLORS[type] || COLORS.MIXED;
+        this.x = 0; this.y = 0;
+        this.cooldown = 0; // 攻击冷却
     }
-
     getStats() {
         let l = this.level;
-        let c = this.components;
         return {
-            dmg: 10 * Math.pow(1.6, l-1),
-            range: 120 + l * 10,
-            splash: (c.RED || 0) * 40 * l,
-            slow: (c.BLUE || 0) * 0.2 * l,
-            manaG: (c.ORANGE || 0) * 5 * l,
-            crit: (c.YELLOW || 0) * 0.15,
-            poison: (c.GREEN || 0) * 10 * l,
-            shred: (c.PURPLE || 0) * 2 * l
+            dmg: 15 * Math.pow(1.5, l-1),
+            range: 150 + l * 10,
+            speed: Math.max(10, 30 - l * 2) // 攻击间隔帧数
         };
     }
 }
 
-// --- 核心逻辑 ---
-function createGem(type) {
-    if (state.mana >= 100) {
-        state.mana -= 100;
-        let gem = new Gem(type);
-        state.inventory.push(gem);
-        updateUI();
+class Enemy {
+    constructor() {
+        this.x = PATH[0].x;
+        this.y = PATH[0].y;
+        this.targetNode = 1;
+        this.maxHp = 100 + state.frame * 0.1; 
+        this.hp = this.maxHp;
+        this.speed = 1.5;
+    }
+    move() {
+        let target = PATH[this.targetNode];
+        let dx = target.x - this.x;
+        let dy = target.y - this.y;
+        let dist = Math.hypot(dx, dy);
+        
+        if (dist < 5) {
+            this.targetNode++;
+            if (this.targetNode >= PATH.length) return false; // 走出地图
+        } else {
+            this.x += (dx / dist) * this.speed;
+            this.y += (dy / dist) * this.speed;
+        }
+        return true;
+    }
+    draw() {
+        // 画怪物
+        ctx.fillStyle = '#888';
+        ctx.beginPath(); ctx.arc(this.x, this.y, 12, 0, Math.PI*2); ctx.fill();
+        // 画血条
+        ctx.fillStyle = '#f00'; ctx.fillRect(this.x - 10, this.y - 20, 20, 4);
+        ctx.fillStyle = '#0f0'; ctx.fillRect(this.x - 10, this.y - 20, 20 * (this.hp / this.maxHp), 4);
     }
 }
 
+// --- 控制逻辑 ---
+function toggleGame() {
+    state.isRunning = !state.isRunning;
+    toggleBtn.innerText = state.isRunning ? "❚❚ 暂停游戏" : "▶ 继续游戏";
+    toggleBtn.style.background = state.isRunning ? "#B22222" : "#2E8B57";
+}
+
+function createGem(type) {
+    if (state.mana >= 100) { state.mana -= 100; state.inventory.push(new Gem(type)); updateUI(); }
+}
 function combine(g1, g2) {
     let newLevel = Math.max(g1.level, g2.level) + (g1.level === g2.level ? 1 : 0);
     let newGem = new Gem('MIXED', newLevel);
-    // 混合组件
-    for (let k in g1.components) newGem.components[k] = (newGem.components[k] || 0) + 0.5;
-    for (let k in g2.components) newGem.components[k] = (newGem.components[k] || 0) + 0.5;
+    if(g1.level === g2.level && g1.color === g2.color) newGem.color = g1.color; // 纯色合成保留颜色
     return newGem;
 }
 
-// --- 交互系统 ---
-canvas.onmousedown = (e) => {
-    const rect = canvas.getBoundingClientRect();
-    const mx = e.clientX - rect.left;
-    const my = e.clientY - rect.top;
-
-    // 检查是否点击了建筑上的宝石
+// --- 战斗逻辑 ---
+function processCombat() {
     state.buildings.forEach(b => {
-        if (Math.hypot(b.x - mx, b.y - my) < 25 && b.gem) {
-            state.selectedBuilding = b;
-            showMenu(e.clientX, e.clientY, b.gem);
+        if (!b.gem) return;
+        let stats = b.gem.getStats();
+        
+        // 冷却递减
+        if (b.gem.cooldown > 0) b.gem.cooldown--;
+
+        // 陷阱范围极小，塔范围大
+        let actualRange = b.type === 'TRAP' ? 30 : stats.range;
+        let actualDmg = b.type === 'TRAP' ? stats.dmg * 0.3 : stats.dmg; // 陷阱削减面板伤害
+
+        if (b.gem.cooldown <= 0) {
+            // 找范围内第一个敌人
+            let target = state.enemies.find(e => Math.hypot(e.x - b.x, e.y - b.y) <= actualRange);
+            if (target) {
+                target.hp -= actualDmg;
+                b.gem.cooldown = stats.speed;
+                // 添加激光特效记录
+                state.lasers.push({ x1: b.x, y1: b.y, x2: target.x, y2: target.y, color: b.gem.color, life: 5 });
+            }
         }
     });
 
-    // 简易备用区选择（这里演示逻辑：点击画布空白处抓取最后创建的宝石）
-    if (!state.selectedBuilding && state.inventory.length > 0) {
-        state.draggingGem = state.inventory.pop();
+    // 清理死亡怪物并给魔力
+    for (let i = state.enemies.length - 1; i >= 0; i--) {
+        if (state.enemies[i].hp <= 0) {
+            state.mana += 10; // 杀怪回蓝
+            state.enemies.splice(i, 1);
+        }
     }
-};
+}
 
-canvas.onmousemove = (e) => {
-    if (state.draggingGem) {
-        const rect = canvas.getBoundingClientRect();
-        state.draggingGem.x = e.clientX - rect.left;
-        state.draggingGem.y = e.clientY - rect.top;
+// --- 渲染与循环 ---
+function drawMap() {
+    ctx.strokeStyle = '#333'; ctx.lineWidth = 40; ctx.lineJoin = 'round';
+    ctx.beginPath();
+    ctx.moveTo(PATH[0].x, PATH[0].y);
+    for(let i=1; i<PATH.length; i++) ctx.lineTo(PATH[i].x, PATH[i].y);
+    ctx.stroke();
+    // 路径中线
+    ctx.strokeStyle = '#555'; ctx.lineWidth = 2; ctx.setLineDash([10, 15]); ctx.stroke();
+    ctx.setLineDash([]);
+}
+
+function draw() {
+    ctx.clearRect(0, 0, 800, 600);
+    drawMap();
+    
+    // 游戏逻辑更新
+    if (state.isRunning) {
+        state.frame++;
+        state.waveFrame++;
+        // 每 60 帧刷一个怪
+        if (state.waveFrame % 60 === 0) state.enemies.push(new Enemy());
+        
+        // 移动怪物，剔除走完的
+        state.enemies = state.enemies.filter(e => e.move());
+        
+        processCombat();
     }
-};
 
+    // 绘制怪物
+    state.enemies.forEach(e => e.draw());
+
+    // 绘制基座与射程圈
+    state.buildings.forEach(b => {
+        ctx.strokeStyle = '#777'; ctx.lineWidth = 2;
+        if (b.type === 'TRAP') {
+            ctx.strokeRect(b.x-20, b.y-20, 40, 40); ctx.fillStyle="#aaa"; ctx.fillText("TRAP", b.x-15, b.y+35);
+        } else {
+            ctx.beginPath(); ctx.arc(b.x, b.y, 25, 0, Math.PI*2); ctx.stroke();
+            ctx.fillStyle="#aaa"; ctx.fillText("TOWER", b.x-18, b.y+40);
+        }
+        
+        // 鼠标悬停在塔上显示射程
+        if (b.gem && !state.draggingGem) {
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.1)';
+            ctx.beginPath();
+            ctx.arc(b.x, b.y, b.type === 'TRAP' ? 30 : b.gem.getStats().range, 0, Math.PI*2);
+            ctx.stroke();
+            drawGem(b.x, b.y, b.gem);
+        } else if (b.gem) {
+            drawGem(b.x, b.y, b.gem);
+        }
+    });
+
+    // 绘制激光
+    for (let i = state.lasers.length - 1; i >= 0; i--) {
+        let l = state.lasers[i];
+        ctx.strokeStyle = l.color; ctx.lineWidth = 3; ctx.shadowBlur = 10; ctx.shadowColor = l.color;
+        ctx.beginPath(); ctx.moveTo(l.x1, l.y1); ctx.lineTo(l.x2, l.y2); ctx.stroke();
+        ctx.shadowBlur = 0;
+        l.life--;
+        if (l.life <= 0) state.lasers.splice(i, 1);
+    }
+
+    // 拖拽中的宝石
+    if (state.draggingGem) drawGem(state.draggingGem.x, state.draggingGem.y, state.draggingGem);
+    
+    updateUI();
+    requestAnimationFrame(draw);
+}
+
+// (拖拽逻辑与之前完全一致，为了节省篇幅，这里打包处理)
+canvas.onmousedown = (e) => {
+    const r = canvas.getBoundingClientRect(); const mx = e.clientX - r.left, my = e.clientY - r.top;
+    state.buildings.forEach(b => {
+        if (Math.hypot(b.x - mx, b.y - my) < 25 && b.gem) { state.selectedBuilding = b; showMenu(e.clientX, e.clientY, b.gem); }
+    });
+    if (!state.selectedBuilding && state.inventory.length > 0) state.draggingGem = state.inventory.pop();
+};
+canvas.onmousemove = (e) => { if (state.draggingGem) { const r = canvas.getBoundingClientRect(); state.draggingGem.x = e.clientX - r.left; state.draggingGem.y = e.clientY - r.top; }};
 canvas.onmouseup = (e) => {
     if (!state.draggingGem) return;
-    const rect = canvas.getBoundingClientRect();
-    const mx = e.clientX - rect.left;
-    const my = e.clientY - rect.top;
-
+    const r = canvas.getBoundingClientRect(); const mx = e.clientX - r.left, my = e.clientY - r.top;
     let placed = false;
     state.buildings.forEach(b => {
         if (Math.hypot(b.x - mx, b.y - my) < 30) {
-            if (!b.gem) {
-                b.gem = state.draggingGem;
-            } else {
-                b.gem = combine(b.gem, state.draggingGem);
-            }
-            placed = true;
+            b.gem = !b.gem ? state.draggingGem : combine(b.gem, state.draggingGem); placed = true;
         }
     });
-
     if (!placed) state.inventory.push(state.draggingGem);
     state.draggingGem = null;
 };
 
-// --- 菜单功能 ---
-function showMenu(x, y, gem) {
-    menu.style.display = 'block';
-    menu.style.left = x + 'px';
-    menu.style.top = y + 'px';
-    document.getElementById('up-cost').innerText = Math.round(100 * Math.pow(2.2, gem.level));
-}
-
+function showMenu(x, y, gem) { menu.style.display = 'block'; menu.style.left = x + 'px'; menu.style.top = y + 'px'; document.getElementById('up-cost').innerText = Math.round(100 * Math.pow(2.2, gem.level)); }
 function handleMenu(action) {
     let b = state.selectedBuilding;
-    if (action === 'upgrade') {
-        let cost = Math.round(100 * Math.pow(2.2, b.gem.level));
-        if (state.mana >= cost) {
-            state.mana -= cost;
-            b.gem.level++;
-        }
-    } else if (action === 'destroy') {
-        state.mana += 50 * b.gem.level;
-        b.gem = null;
-    }
-    menu.style.display = 'none';
-    state.selectedBuilding = null;
-    updateUI();
-}
-
-// --- 渲染循环 ---
-function draw() {
-    ctx.clearRect(0, 0, 800, 600);
-    
-    // 1. 绘制基座
-    state.buildings.forEach(b => {
-        ctx.strokeStyle = '#555';
-        ctx.lineWidth = 2;
-        if (b.type === 'TRAP') {
-            ctx.strokeRect(b.x-20, b.y-20, 40, 40);
-            ctx.fillText("TRAP", b.x-15, b.y+35);
-        } else {
-            ctx.beginPath(); ctx.arc(b.x, b.y, 25, 0, Math.PI*2); ctx.stroke();
-            ctx.fillText(b.type === 'TOWER' ? "MAIN" : "AMP", b.x-15, b.y+40);
-        }
-
-        if (b.gem) drawGem(b.x, b.y, b.gem);
-    });
-
-    // 2. 绘制拖拽中的宝石
-    if (state.draggingGem) drawGem(state.draggingGem.x, state.draggingGem.y, state.draggingGem);
-
-    // 3. 模拟简单的攻击视觉 (仅用于演示)
-    state.frame++;
-    requestAnimationFrame(draw);
+    if (action === 'upgrade') { let cost = Math.round(100 * Math.pow(2.2, b.gem.level)); if (state.mana >= cost) { state.mana -= cost; b.gem.level++; } }
+    else if (action === 'destroy') { state.mana += 50 * b.gem.level; b.gem = null; }
+    menu.style.display = 'none'; state.selectedBuilding = null; updateUI();
 }
 
 function drawGem(x, y, gem) {
-    ctx.shadowBlur = 15;
-    ctx.shadowColor = gem.color;
-    ctx.fillStyle = gem.color;
-    ctx.beginPath();
-    // 等级越高，多边形边数越多
+    ctx.shadowBlur = 15; ctx.shadowColor = gem.color; ctx.fillStyle = gem.color; ctx.beginPath();
     let sides = 3 + gem.level;
-    for(let i=0; i<=sides; i++) {
-        let angle = i * 2 * Math.PI / sides;
-        ctx.lineTo(x + 12 * Math.cos(angle), y + 12 * Math.sin(angle));
-    }
-    ctx.fill();
-    ctx.shadowBlur = 0;
-    ctx.fillStyle = "#000";
-    ctx.font = "bold 10px Arial";
-    ctx.fillText(gem.level, x-3, y+4);
+    for(let i=0; i<=sides; i++) { let angle = i * 2 * Math.PI / sides - Math.PI/2; ctx.lineTo(x + 15 * Math.cos(angle), y + 15 * Math.sin(angle)); }
+    ctx.fill(); ctx.shadowBlur = 0; ctx.fillStyle = "#fff"; ctx.font = "bold 12px Arial"; ctx.fillText(gem.level, x-4, y+4);
 }
+function updateUI() { manaEl.innerText = Math.floor(state.mana); }
 
-function updateUI() {
-    manaEl.innerText = Math.floor(state.mana);
-}
-
-// 启动
-setInterval(() => { state.mana += 0.5; updateUI(); }, 100); // 自动回蓝
 draw();
 </script>
 </body>
